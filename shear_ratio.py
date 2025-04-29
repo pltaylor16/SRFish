@@ -134,17 +134,21 @@ class Forecast:
 
     def extract_gk_vector(self, cl_dict):
         """
-        Extract vector of C_ell^{g_i kappa_j} where j > i.
+        Extract vector of C_ell^{g_i kappa_j} where mean(z_src) > mean(z_lens).
         """
         cl_gk = cl_dict["gk"]
         n_lens, n_src, n_ell = cl_gk.shape
+
+        # Compute mean redshifts
+        z_mean_lens = [np.trapz(z * nz, z) for (z, nz) in self.nz_lens]
+        z_mean_src = [np.trapz(z * nz, z) for (z, nz) in self.nz_src]
 
         gk_vector = []
         labels = []
 
         for i in range(n_lens):
             for j in range(n_src):
-                if j > i:
+                if z_mean_src[j] > z_mean_lens[i]:   # <-- use mean z instead of bin number
                     gk_vector.append(cl_gk[i, j])
                     labels.append(f"g{i+1}k{j+1}")
 
