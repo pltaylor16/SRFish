@@ -134,21 +134,21 @@ class Forecast:
 
     def extract_gk_vector(self, cl_dict):
         """
-        Extract vector of C_ell^{g_i kappa_j} where mean(z_src) > mean(z_lens).
+        Extract vector of C_ell^{g_i kappa_j} where mean_z_src > mean_z_lens.
         """
         cl_gk = cl_dict["gk"]
         n_lens, n_src, n_ell = cl_gk.shape
 
-        # Compute mean redshifts
-        z_mean_lens = [np.trapz(z * nz, z) for (z, nz) in self.nz_lens]
-        z_mean_src = [np.trapz(z * nz, z) for (z, nz) in self.nz_src]
-
         gk_vector = []
         labels = []
 
+        # Compute mean z for each bin
+        mean_z_lens = [np.average(z, weights=nz) for z, nz in self.nz_lens]
+        mean_z_src = [np.average(z, weights=nz) for z, nz in self.nz_src]
+
         for i in range(n_lens):
             for j in range(n_src):
-                if z_mean_src[j] > z_mean_lens[i]:   # <-- use mean z instead of bin number
+                if mean_z_src[j] > mean_z_lens[i]:
                     gk_vector.append(cl_gk[i, j])
                     labels.append(f"g{i+1}k{j+1}")
 
@@ -157,7 +157,7 @@ class Forecast:
 
     def compute_gk_covariance_matrix_gauss(self, cl_dict, ell, delta_ell):
         """
-        Compute the Gaussian covariance matrix for gk_vector.
+        Compute the Gaussian covariance matrix for gk_vector, matching the new (mean(z_src) > mean(z_lens)) logic.
         """
         cl_gg = cl_dict["gg"]
         cl_gk = cl_dict["gk"]
@@ -165,16 +165,22 @@ class Forecast:
         n_lens = len(self.nz_lens)
         n_src = len(self.nz_src)
 
+        # Compute mean redshifts
+        lens_means = [np.average(z, weights=nz) for (z, nz) in self.nz_lens]
+        src_means  = [np.average(z, weights=nz) for (z, nz) in self.nz_src]
+
+        # Select only valid (lens, source) pairs
         indices = []
         labels = []
         for i in range(n_lens):
             for j in range(n_src):
-                if j > i:
+                if src_means[j] > lens_means[i]:
                     indices.append((i, j))
                     labels.append(f"g{i+1}k{j+1}")
 
         N = len(indices)
 
+        # Survey information
         steradian_conversion = 3600 * (180 / np.pi)**2
         nbar_lens = self.n_eff * steradian_conversion / n_lens
         nbar_src = self.n_eff * steradian_conversion / n_src
@@ -202,9 +208,11 @@ class Forecast:
 
         return cov, labels
 
+
     def compute_ssc_covariance_pyssc(self, cl_dict, ell_eff, mask_fsky=1.0):
         """
-        Compute SSC covariance matrix for gk vector using PySSC.
+        Compute SSC covariance matrix for gk vector using PySSC,
+        keeping only pairs with mean_z_src > mean_z_lens.
         """
         import PySSC
 
@@ -216,7 +224,6 @@ class Forecast:
         kernels = np.zeros((n_total, z_arr.size))
         for i, (z, nz) in enumerate(self.nz_lens):
             kernels[i, :] = nz / np.trapz(nz, z) * self.bias_lens[i]
-
 
         for j, (z, nz) in enumerate(self.nz_src):
             a = 1.0 / (1.0 + z)
@@ -233,9 +240,8 @@ class Forecast:
                     nz_norm[mask] * (chi[mask] - chi_i) / chi[mask], z[mask]
                 )
 
-
-        prefactor = (3/2) * self.fid_cosmo['Omega_m'] * (self.fid_cosmo['h']**2) * (ccl.physical_constants.CLIGHT/1000.)**2
-        kernels[n_lens + j, :] = prefactor * chi * (1 + z) * integrand
+            prefactor = (3/2) * self.fid_cosmo['Omega_m'] * (self.fid_cosmo['h']**2) * (ccl.physical_constants.CLIGHT/1000.)**2
+            kernels[n_lens + j, :] = prefactor * chi * (1 + z) * integrand
 
         cosmo_params = {
             'h': self.fid_cosmo['h'],
@@ -248,10 +254,14 @@ class Forecast:
             'output': 'mPk',
         }
 
-
         Sijkl = PySSC.Sijkl(z_arr, kernels, cosmo_params=cosmo_params)
-        gk_vector, labels = self.extract_gk_vector(cl_dict)
+
+        gk_vector, labels = self.extract_gk_vector(cl_dict)  # uses updated logic
         N = len(labels)
+
+        # Precompute mean redshifts
+        mean_z_lens = [np.average(z, weights=nz) for z, nz in self.nz_lens]
+        mean_z_src = [np.average(z, weights=nz) for z, nz in self.nz_src]
 
         cov_ssc = np.zeros((N, N))
 
@@ -263,9 +273,13 @@ class Forecast:
             i, j = _decode(labels[a])
             for b in range(N):
                 m, n = _decode(labels[b])
-                R_C_a = (self.bias_lens[i]) * 3. * cl_dict["gk"][i, j, 0]
-                R_C_b = (self.bias_lens[m]) * 3. * cl_dict["gk"][m, n, 0]
-                cov_ssc[a, b] = R_C_a * R_C_b * Sijkl[i, j, m, n]
+
+                if (mean_z_src[j] > mean_z_lens[i]) and (mean_z_src[n] > mean_z_lens[m]):
+                    R_C_a = (self.bias_lens[i]) * 3. * cl_dict["gk"][i, j, 0]
+                    R_C_b = (self.bias_lens[m]) * 3. * cl_dict["gk"][m, n, 0]
+                    cov_ssc[a, b] = R_C_a * R_C_b * Sijkl[i, j, m, n]
+                else:
+                    cov_ssc[a, b] = 0.0
 
         return cov_ssc, labels
 
