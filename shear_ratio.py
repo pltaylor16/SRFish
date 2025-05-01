@@ -44,6 +44,7 @@ class Forecast:
 
         self._init_cosmology()
 
+
     def _init_cosmology(self):
         """
         Set up pyccl cosmology object.
