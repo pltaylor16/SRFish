@@ -136,9 +136,10 @@ class Forecast:
         return {"gg": cl_gg, "gk": cl_gk, "kk": cl_kk}
 
     # --- Update extract_gk_vector method ---
-    def extract_gk_vector(self, cl_dict):
+    def extract_gk_vector(self, cl_dict, fixed_labels=None):
         """
         Extract vector of C_ell^{g_i kappa_j} where mean_z_src > mean_z_lens.
+        If fixed_labels is provided, only include those specific (lens, source) pairs.
         """
         cl_gk = cl_dict["gk"]
         n_lens, n_src, n_ell = cl_gk.shape
@@ -146,15 +147,25 @@ class Forecast:
         gk_vector = []
         labels = []
 
+        # Compute mean redshift of each bin
         mean_z_lens = [np.average(z, weights=nz) for z, nz in self.nz_lens]
         mean_z_src = [np.average(z, weights=nz) for z, nz in self.nz_src]
 
         for i in range(n_lens):
             for j in range(n_src):
-                if mean_z_src[j] > mean_z_lens[i]:
-                    val = cl_gk[i, j]
-                    gk_vector.append(val)
-                    labels.append(f"g{i+1}k{j+1}")
+                label = f"g{i+1}k{j+1}"
+
+                # If fixed_labels provided, include only requested pairs
+                if fixed_labels is not None:
+                    if label not in fixed_labels:
+                        continue
+                else:
+                    # Default logic: include only if z_src > z_lens
+                    if mean_z_src[j] <= mean_z_lens[i]:
+                        continue
+
+                gk_vector.append(cl_gk[i, j])
+                labels.append(label)
 
         gk_vector = np.array(gk_vector)
         return gk_vector, labels
@@ -301,14 +312,16 @@ class Forecast:
 
     def compute_derivatives_gk(self, cl_fid, param_names):
         """
-        Compute derivatives of gk_vector w.r.t. cosmological parameters and linear biases,
-        using 5% finite differences. Linear biases are labeled as 'bias_i'.
+        Compute derivatives of gk_vector w.r.t. cosmological parameters, linear biases,
+        delta_z (lens/source), and m_src using 5% finite differences.
         """
         derivs = []
-        gk_fid, labels = self.extract_gk_vector(cl_fid)
+        gk_fid, fixed_labels = self.extract_gk_vector(cl_fid)
 
         # --- Cosmological parameter derivatives ---
         for pname in param_names:
+            if pname.startswith("bias_") or pname.startswith("delta_z_") or pname.startswith("m_src_"):
+                continue
             val = self.fid_cosmo[pname]
             step = 0.05 * abs(val)
             p_up = self.fid_cosmo.copy(); p_up[pname] += step
@@ -324,7 +337,10 @@ class Forecast:
                 bias_lens=self.bias_lens,
                 fid_cosmo=p_up,
                 use_ssc=self.use_ssc,
-                amplitude_prior_std=self.amplitude_prior_std
+                amplitude_prior_std=self.amplitude_prior_std,
+                marginalize_delta_z_lens=self.marginalize_delta_z_lens,
+                marginalize_delta_z_src=self.marginalize_delta_z_src,
+                marginalize_multiplicative_bias=self.marginalize_multiplicative_bias
             )
             down_forecast = Forecast(
                 nz_lens=self.nz_lens,
@@ -336,23 +352,23 @@ class Forecast:
                 bias_lens=self.bias_lens,
                 fid_cosmo=p_down,
                 use_ssc=self.use_ssc,
-                amplitude_prior_std=self.amplitude_prior_std
+                amplitude_prior_std=self.amplitude_prior_std,
+                marginalize_delta_z_lens=self.marginalize_delta_z_lens,
+                marginalize_delta_z_src=self.marginalize_delta_z_src,
+                marginalize_multiplicative_bias=self.marginalize_multiplicative_bias
             )
 
-            gk_up, _ = up_forecast.extract_gk_vector(up_forecast.compute_cls())
-            gk_down, _ = down_forecast.extract_gk_vector(down_forecast.compute_cls())
-            deriv = (gk_up - gk_down) / (2 * step)
-            derivs.append(deriv.flatten())
+            gk_up, _ = up_forecast.extract_gk_vector(up_forecast.compute_cls(), fixed_labels)
+            gk_down, _ = down_forecast.extract_gk_vector(down_forecast.compute_cls(), fixed_labels)
+            derivs.append(((gk_up - gk_down) / (2 * step)).flatten())
 
-        full_param_names = list(param_names)
+        full_param_names = [p for p in param_names if not p.startswith("bias_") and not p.startswith("delta_z_") and not p.startswith("m_src_")]
 
-        # --- Bias parameter derivatives ---
-        for i in range(len(self.bias_lens)):
-            bias_up = self.bias_lens.copy()
-            bias_down = self.bias_lens.copy()
-            step = 0.05 * abs(bias_up[i])
-            bias_up[i] += step
-            bias_down[i] -= step
+        # --- Linear bias derivatives ---
+        for i, bval in enumerate(self.bias_lens):
+            step = 0.05 * abs(bval)
+            bias_up = self.bias_lens.copy(); bias_up[i] += step
+            bias_down = self.bias_lens.copy(); bias_down[i] -= step
 
             up_forecast = Forecast(
                 nz_lens=self.nz_lens,
@@ -364,7 +380,10 @@ class Forecast:
                 bias_lens=bias_up,
                 fid_cosmo=self.fid_cosmo,
                 use_ssc=self.use_ssc,
-                amplitude_prior_std=self.amplitude_prior_std
+                amplitude_prior_std=self.amplitude_prior_std,
+                marginalize_delta_z_lens=self.marginalize_delta_z_lens,
+                marginalize_delta_z_src=self.marginalize_delta_z_src,
+                marginalize_multiplicative_bias=self.marginalize_multiplicative_bias
             )
             down_forecast = Forecast(
                 nz_lens=self.nz_lens,
@@ -376,14 +395,128 @@ class Forecast:
                 bias_lens=bias_down,
                 fid_cosmo=self.fid_cosmo,
                 use_ssc=self.use_ssc,
-                amplitude_prior_std=self.amplitude_prior_std
+                amplitude_prior_std=self.amplitude_prior_std,
+                marginalize_delta_z_lens=self.marginalize_delta_z_lens,
+                marginalize_delta_z_src=self.marginalize_delta_z_src,
+                marginalize_multiplicative_bias=self.marginalize_multiplicative_bias
             )
 
-            gk_up, _ = up_forecast.extract_gk_vector(up_forecast.compute_cls())
-            gk_down, _ = down_forecast.extract_gk_vector(down_forecast.compute_cls())
-            deriv = (gk_up - gk_down) / (2 * step)
-            derivs.append(deriv.flatten())
+            gk_up, _ = up_forecast.extract_gk_vector(up_forecast.compute_cls(), fixed_labels)
+            gk_down, _ = down_forecast.extract_gk_vector(down_forecast.compute_cls(), fixed_labels)
+            derivs.append(((gk_up - gk_down) / (2 * step)).flatten())
             full_param_names.append(f"bias_{i}")
+
+        # --- delta_z_lens derivatives ---
+        if self.marginalize_delta_z_lens:
+            for i in range(len(self.nz_lens)):
+                step = 0.01
+                def shift_zdist(z, nz, dz): return (z + dz, nz)
+
+                up_lens = self.nz_lens.copy()
+                down_lens = self.nz_lens.copy()
+                up_lens[i] = shift_zdist(*up_lens[i], +step)
+                down_lens[i] = shift_zdist(*down_lens[i], -step)
+
+                up_forecast = Forecast(
+                    nz_lens=up_lens,
+                    nz_src=self.nz_src,
+                    ell=self.ell,
+                    area_deg2=self.area_deg2,
+                    n_eff=self.n_eff,
+                    sigma_eps=self.sigma_eps,
+                    bias_lens=self.bias_lens,
+                    fid_cosmo=self.fid_cosmo,
+                    use_ssc=self.use_ssc,
+                    amplitude_prior_std=self.amplitude_prior_std,
+                    marginalize_delta_z_lens=self.marginalize_delta_z_lens,
+                    marginalize_delta_z_src=self.marginalize_delta_z_src,
+                    marginalize_multiplicative_bias=self.marginalize_multiplicative_bias
+                )
+                down_forecast = Forecast(
+                    nz_lens=down_lens,
+                    nz_src=self.nz_src,
+                    ell=self.ell,
+                    area_deg2=self.area_deg2,
+                    n_eff=self.n_eff,
+                    sigma_eps=self.sigma_eps,
+                    bias_lens=self.bias_lens,
+                    fid_cosmo=self.fid_cosmo,
+                    use_ssc=self.use_ssc,
+                    amplitude_prior_std=self.amplitude_prior_std,
+                    marginalize_delta_z_lens=self.marginalize_delta_z_lens,
+                    marginalize_delta_z_src=self.marginalize_delta_z_src,
+                    marginalize_multiplicative_bias=self.marginalize_multiplicative_bias
+                )
+
+                gk_up, _ = up_forecast.extract_gk_vector(up_forecast.compute_cls(), fixed_labels)
+                gk_down, _ = down_forecast.extract_gk_vector(down_forecast.compute_cls(), fixed_labels)
+                derivs.append(((gk_up - gk_down) / (2 * step)).flatten())
+                full_param_names.append(f"delta_z_lens_{i}")
+
+        # --- delta_z_src derivatives ---
+        if self.marginalize_delta_z_src:
+            for i in range(len(self.nz_src)):
+                step = 0.01
+                def shift_zdist(z, nz, dz): return (z + dz, nz)
+
+                up_src = self.nz_src.copy()
+                down_src = self.nz_src.copy()
+                up_src[i] = shift_zdist(*up_src[i], +step)
+                down_src[i] = shift_zdist(*down_src[i], -step)
+
+                up_forecast = Forecast(
+                    nz_lens=self.nz_lens,
+                    nz_src=up_src,
+                    ell=self.ell,
+                    area_deg2=self.area_deg2,
+                    n_eff=self.n_eff,
+                    sigma_eps=self.sigma_eps,
+                    bias_lens=self.bias_lens,
+                    fid_cosmo=self.fid_cosmo,
+                    use_ssc=self.use_ssc,
+                    amplitude_prior_std=self.amplitude_prior_std,
+                    marginalize_delta_z_lens=self.marginalize_delta_z_lens,
+                    marginalize_delta_z_src=self.marginalize_delta_z_src,
+                    marginalize_multiplicative_bias=self.marginalize_multiplicative_bias
+                )
+                down_forecast = Forecast(
+                    nz_lens=self.nz_lens,
+                    nz_src=down_src,
+                    ell=self.ell,
+                    area_deg2=self.area_deg2,
+                    n_eff=self.n_eff,
+                    sigma_eps=self.sigma_eps,
+                    bias_lens=self.bias_lens,
+                    fid_cosmo=self.fid_cosmo,
+                    use_ssc=self.use_ssc,
+                    amplitude_prior_std=self.amplitude_prior_std,
+                    marginalize_delta_z_lens=self.marginalize_delta_z_lens,
+                    marginalize_delta_z_src=self.marginalize_delta_z_src,
+                    marginalize_multiplicative_bias=self.marginalize_multiplicative_bias
+                )
+
+                gk_up, _ = up_forecast.extract_gk_vector(up_forecast.compute_cls(), fixed_labels)
+                gk_down, _ = down_forecast.extract_gk_vector(down_forecast.compute_cls(), fixed_labels)
+                derivs.append(((gk_up - gk_down) / (2 * step)).flatten())
+                full_param_names.append(f"delta_z_src_{i}")
+
+        # --- m_src derivatives ---
+        if self.marginalize_multiplicative_bias:
+            for i in range(len(self.nz_src)):
+                step = 0.01
+                gk_base, _ = self.extract_gk_vector(cl_fid, fixed_labels)
+
+                # Perturbed values
+                gk_up = gk_base.copy()
+                gk_down = gk_base.copy()
+
+                for idx, label in enumerate(fixed_labels):
+                    if label.endswith(f"k{i+1}"):
+                        gk_up[idx] *= (1 + step)
+                        gk_down[idx] *= (1 - step)
+
+                derivs.append(((gk_up - gk_down) / (2 * step)).flatten())
+                full_param_names.append(f"m_src_{i}")
 
         return np.array(derivs), full_param_names
 
@@ -407,6 +540,15 @@ class Forecast:
                     idx = int(pname.split("_")[1])
                     prior_std = self.amplitude_prior_std[idx]
                     F[i, i] += 1.0 / (prior_std ** 2)
+
+        # Add Gaussian priors for delta_z and m_src
+        for i, pname in enumerate(full_param_names):
+            if pname.startswith("delta_z_lens") and self.delta_z_lens_prior_std:
+                F[i, i] += 1.0 / (self.delta_z_lens_prior_std**2)
+            elif pname.startswith("delta_z_src") and self.delta_z_src_prior_std:
+                F[i, i] += 1.0 / (self.delta_z_src_prior_std**2)
+            elif pname.startswith("m_src") and self.multiplicative_bias_prior_std:
+                F[i, i] += 1.0 / (self.multiplicative_bias_prior_std**2)
 
         return full_param_names, F
 
