@@ -15,8 +15,6 @@ class Forecast:
                  bias_lens,
                  fid_cosmo,
                  use_ssc=True,
-                 use_amplitudes=False,
-                 amplitudes=None,
                  amplitude_prior_std=None,
                  marginalize_delta_z_lens=False,
                  marginalize_delta_z_src=False,
@@ -37,12 +35,9 @@ class Forecast:
         self.fid_cosmo = fid_cosmo
         self.use_ssc = use_ssc
 
-        # Amplitude settings
-        self.use_amplitudes = use_amplitudes
-        self.amplitudes = np.ones(len(nz_lens)) if amplitudes is None else np.array(amplitudes)
+        # Gaussian prior std on linear biases (mean 0), one per lens bin
         self.amplitude_prior_std = amplitude_prior_std
 
-        # Redshift/multiplicative bias settings
         self.marginalize_delta_z_lens = marginalize_delta_z_lens
         self.marginalize_delta_z_src = marginalize_delta_z_src
         self.delta_z_lens_prior_std = delta_z_lens_prior_std
@@ -50,9 +45,6 @@ class Forecast:
         self.marginalize_multiplicative_bias = marginalize_multiplicative_bias
         self.multiplicative_bias_prior_std = multiplicative_bias_prior_std
 
-        self._init_cosmology()
-
-        
         self._init_cosmology()
 
     def _init_cosmology(self):
@@ -147,7 +139,6 @@ class Forecast:
     def extract_gk_vector(self, cl_dict):
         """
         Extract vector of C_ell^{g_i kappa_j} where mean_z_src > mean_z_lens.
-        Apply amplitude rescaling if enabled.
         """
         cl_gk = cl_dict["gk"]
         n_lens, n_src, n_ell = cl_gk.shape
@@ -162,8 +153,6 @@ class Forecast:
             for j in range(n_src):
                 if mean_z_src[j] > mean_z_lens[i]:
                     val = cl_gk[i, j]
-                    if self.use_amplitudes:
-                        val = self.amplitudes[i] * val
                     gk_vector.append(val)
                     labels.append(f"g{i+1}k{j+1}")
 
@@ -312,8 +301,8 @@ class Forecast:
 
     def compute_derivatives_gk(self, cl_fid, param_names):
         """
-        Compute derivatives of gk_vector w.r.t. cosmological parameters and,
-        optionally, amplitude parameters (one per lens bin), using 5% finite differences.
+        Compute derivatives of gk_vector w.r.t. cosmological parameters and linear biases,
+        using 5% finite differences. Linear biases are labeled as 'bias_i'.
         """
         derivs = []
         gk_fid, labels = self.extract_gk_vector(cl_fid)
@@ -335,8 +324,7 @@ class Forecast:
                 bias_lens=self.bias_lens,
                 fid_cosmo=p_up,
                 use_ssc=self.use_ssc,
-                use_amplitudes=self.use_amplitudes,
-                amplitudes=self.amplitudes.copy()
+                amplitude_prior_std=self.amplitude_prior_std
             )
             down_forecast = Forecast(
                 nz_lens=self.nz_lens,
@@ -348,8 +336,7 @@ class Forecast:
                 bias_lens=self.bias_lens,
                 fid_cosmo=p_down,
                 use_ssc=self.use_ssc,
-                use_amplitudes=self.use_amplitudes,
-                amplitudes=self.amplitudes.copy()
+                amplitude_prior_std=self.amplitude_prior_std
             )
 
             gk_up, _ = up_forecast.extract_gk_vector(up_forecast.compute_cls())
@@ -359,17 +346,44 @@ class Forecast:
 
         full_param_names = list(param_names)
 
-        # --- Amplitude parameter derivatives ---
-        if self.use_amplitudes:
-            n_lens = len(self.nz_lens)
-            gk_fid = gk_fid.flatten()
-            for i in range(n_lens):
-                deriv = np.zeros_like(gk_fid)
-                for idx, lbl in enumerate(labels):
-                    if lbl.startswith(f"g{i+1}k"):
-                        deriv[idx] = gk_fid[idx]
-                derivs.append(deriv)
-                full_param_names.append(f"A{i+1}")
+        # --- Bias parameter derivatives ---
+        for i in range(len(self.bias_lens)):
+            bias_up = self.bias_lens.copy()
+            bias_down = self.bias_lens.copy()
+            step = 0.05 * abs(bias_up[i])
+            bias_up[i] += step
+            bias_down[i] -= step
+
+            up_forecast = Forecast(
+                nz_lens=self.nz_lens,
+                nz_src=self.nz_src,
+                ell=self.ell,
+                area_deg2=self.area_deg2,
+                n_eff=self.n_eff,
+                sigma_eps=self.sigma_eps,
+                bias_lens=bias_up,
+                fid_cosmo=self.fid_cosmo,
+                use_ssc=self.use_ssc,
+                amplitude_prior_std=self.amplitude_prior_std
+            )
+            down_forecast = Forecast(
+                nz_lens=self.nz_lens,
+                nz_src=self.nz_src,
+                ell=self.ell,
+                area_deg2=self.area_deg2,
+                n_eff=self.n_eff,
+                sigma_eps=self.sigma_eps,
+                bias_lens=bias_down,
+                fid_cosmo=self.fid_cosmo,
+                use_ssc=self.use_ssc,
+                amplitude_prior_std=self.amplitude_prior_std
+            )
+
+            gk_up, _ = up_forecast.extract_gk_vector(up_forecast.compute_cls())
+            gk_down, _ = down_forecast.extract_gk_vector(down_forecast.compute_cls())
+            deriv = (gk_up - gk_down) / (2 * step)
+            derivs.append(deriv.flatten())
+            full_param_names.append(f"bias_{i}")
 
         return np.array(derivs), full_param_names
 
@@ -386,11 +400,25 @@ class Forecast:
             for j in range(n_params):
                 F[i, j] = derivs[i] @ cov_inv @ derivs[j]
 
-        # --- Add Gaussian priors to amplitudes ---
-        if self.use_amplitudes and self.amplitude_prior_std is not None:
+        # Add Gaussian priors on bias parameters (assumed to be named "bias_i")
+        if self.amplitude_prior_std is not None:
             for i, pname in enumerate(full_param_names):
-                if pname.startswith("A"):
-                    F[i, i] += 1.0 / (self.amplitude_prior_std**2)
+                if pname.startswith("bias_"):
+                    idx = int(pname.split("_")[1])
+                    prior_std = self.amplitude_prior_std[idx]
+                    F[i, i] += 1.0 / (prior_std ** 2)
 
         return full_param_names, F
+
+
+
+
+
+
+
+
+
+
+
+
 
