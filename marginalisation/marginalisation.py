@@ -411,6 +411,65 @@ class Forecast:
         return full_param_names, F
 
 
+    def draw_fisher_samples(self, fisher, param_list, truths, n_samples=10000):
+        from numpy.linalg import inv
+    
+        cov = inv(fisher)
+        rng = np.random.default_rng()
+    
+        samples = rng.multivariate_normal(mean=np.zeros(len(param_list)), cov=cov, size=n_samples)
+    
+        # Shift samples by truth values
+        mean_vals = np.array([truths.get(p, 0.0) for p in param_list])  # 0 for systematics like delta_z, m_src
+        shifted_samples = samples + mean_vals
+    
+        return shifted_samples, param_list
+
+    def plot_fisher_samples_with_getdist(self, samples, param_names, truths):
+        import numpy as np
+        from getdist import MCSamples
+        import getdist.plots as gdplt
+        import matplotlib.pyplot as plt
+    
+        # Only cosmological parameters for plotting
+        cosmo_params = ["Omega_m", "Omega_b", "sigma_8", "n_s", "h", "w0", "wa"]
+    
+        # Filter param_names to cosmological ones
+        param_names_cosmo = [p for p in param_names if p in cosmo_params]
+        idx_cosmo = [param_names.index(p) for p in param_names_cosmo]
+    
+        # Select only the cosmological samples
+        samples_cosmo = samples[:, idx_cosmo]
+    
+        # Prettier labels
+        label_map = {
+            "Omega_m": r"\Omega_m",
+            "Omega_b": r"\Omega_b",
+            "sigma_8": r"\sigma_8",
+            "n_s": r"n_s",
+            "h": r"h",
+            "w0": r"w_0",
+            "wa": r"w_a",
+        }
+        labels = [label_map[p] for p in param_names_cosmo]
+    
+        gdsamples = MCSamples(samples=samples_cosmo, names=param_names_cosmo, labels=labels)
+    
+        # Turn on LaTeX
+        plt.rcParams.update({
+            "text.usetex": True,
+            "font.family": "serif",
+            "font.serif": ["Computer Modern Roman"],
+            "axes.labelsize": 16,
+            "font.size": 14,
+            "legend.fontsize": 12,
+        })
+    
+        # Plot
+        g = gdplt.get_subplot_plotter()
+        g.triangle_plot(gdsamples, filled=True)
+
+
 
 
 
