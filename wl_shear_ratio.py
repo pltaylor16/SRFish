@@ -136,35 +136,28 @@ class Forecast:
 
     def extract_kk_vector(self, cl_dict):
         """
-        Extract a flattened data vector from the κκ (weak lensing only) Cls.
-
-        Parameters
-        ----------
-        cl_dict : dict
-            Dictionary of Cls as returned by compute_cls(). Should contain "kk".
+        Extract a vector of C_ell^{κ_i κ_j} for i <= j.
 
         Returns
         -------
-        vector : np.ndarray
-            Flattened data vector of C_ell^{κκ} for all i <= j.
+        kk_vector : np.ndarray
+            Array of shape (n_valid_pairs, n_ell)
         labels : list of str
-            Labels for each element of the data vector.
+            Labels for each κκ pair, like 'kk_0_2'
         """
         cl_kk = cl_dict["kk"]
-        n_src = cl_kk.shape[0]
-        ell = self.ell
+        n_src, _, n_ell = cl_kk.shape
 
         vec = []
         labels = []
 
         for i in range(n_src):
             for j in range(i, n_src):
-                label = f"kk_{i}_{j}"
-                vec.append(cl_kk[i, j])
-                labels.append(label)
+                vec.append(cl_kk[i, j])  # shape (n_ell,)
+                labels.append(f"kk_{i}_{j}")
 
-        vector = np.concatenate(vec)
-        return vector, labels
+        kk_vector = np.stack(vec, axis=0)  # shape (n_valid_pairs, n_ell)
+        return kk_vector, labels
 
 
     def compute_kk_covariance_matrix_gauss(self, cl_dict, ell, delta_ell):
@@ -405,7 +398,7 @@ class Forecast:
         samples = samples[..., np.newaxis] * np.ones((1, 1, n_ell))
         return samples
 
-    def monte_carlo_shear_ratio_cov_kk(self, kk_vector, kk_cov, kk_labels, nsamples=20000, seed=None):
+    def monte_carlo_shear_ratio_cov(self, kk_vector, kk_cov, kk_labels, nsamples=20000, seed=None):
         """
         Compute the covariance of the shear ratio data vector using MC sampling
         for κκ angular power spectra.
@@ -448,7 +441,7 @@ class Forecast:
 
 
 
-    def compute_shear_ratio_derivatives_kk(self, cl_dict, kk_labels, param_dict, step_frac=0.05):
+    def compute_shear_ratio_derivatives(self, cl_dict, kk_labels, param_dict, step_frac=0.05):
         """
         Compute numerical derivatives of the shear-ratio data vector R = Cl^{kk}_ij / Cl^{kk}_ik
         with respect to cosmological and nuisance parameters, for κκ spectra.
@@ -549,7 +542,7 @@ class Forecast:
 
         return derivs, R_fid[:, 0], ratio_labels
 
-    def compute_shear_ratio_fisher_kk(self, R_cov, derivs):
+    def compute_shear_ratio_fisher(self, R_cov, derivs):
         """
         Compute Fisher matrix from κκ shear ratio derivatives and covariance.
         Adds Gaussian priors for delta_z_src and multiplicative bias if marginalized.
